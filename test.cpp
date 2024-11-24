@@ -4,30 +4,30 @@
 
 #define N 1024
 
-// 抽象的接口，用来告诉FPGA读取什么地方的数据
+// abstract interface to tell FPGA what data to read from
 void fpga_register_write(uint64_t address, uint32_t value)
 {
-    // 当前接口只是占位符，等具体实现时填充功能
+    // A placeholder and will be filled when implemented
     std::cout << "FPGA register write (stub): Address = " << address << ", Value = " << value << std::endl;
 }
 
-// 简单的加法操作
+// simple addition operation
 __global__ void gpu_addition(float *data, int size)
 {
     int idx = threadIdx.x;
     if (idx < size)
     {
-        data[idx] += 1.0f; // 给每个数据加1
+        data[idx] += 1.0f; // add 1 to each data
     }
 }
 
 int main()
 {
-    // 分配GPU显存
+    // allocate GPU memory
     float *d_data;
     hipMalloc(&d_data, N * sizeof(float));
 
-    // 初始化数据并复制到GPU
+    // initialize data and copy it to the GPU
     std::vector<float> h_data(N);
     for (int i = 0; i < N; i++)
     {
@@ -36,13 +36,13 @@ int main()
 
     hipMemcpy(d_data, h_data.data(), N * sizeof(float), hipMemcpyHostToDevice);
 
-    // 执行GPU计算（加法操作）
+    // execute GPU computation
     hipLaunchKernelGGL(gpu_addition, dim3(1), dim3(N), 0, 0, d_data, N);
 
-    // 从GPU复制结果回主机
+    // copy the result back to the host
     hipMemcpy(h_data.data(), d_data, N * sizeof(float), hipMemcpyDeviceToHost);
 
-    // 打印结果
+    // print the result
     std::cout << "Result from GPU: ";
     for (int i = 0; i < N; i++)
     {
@@ -50,12 +50,12 @@ int main()
     }
     std::cout << std::endl;
 
-    // 使用抽象接口（占位符）
-    uint64_t fake_address = 0x1000;                // 假设的GPU显存地址
-    uint32_t fake_value = 12345;                   // 假设的要写入的值
-    fpga_register_write(fake_address, fake_value); // 写入FPGA寄存器的抽象接口
+    // an abstract interface for placeholder
+    uint64_t fake_address = 0x1000;                // assume GPU memory
+    uint32_t fake_value = 12345;                   // assume values to be written.
+    fpga_register_write(fake_address, fake_value); // abstract interface to write to FPGA registers
 
-    // 释放显存
+    // release memory
     hipFree(d_data);
 
     return 0;
