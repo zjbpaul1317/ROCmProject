@@ -7,78 +7,89 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdint>
+#include <cassert>
 
 // Define IOCTL commands
-#define BLUE_DMA_CONFIG _IOW('d', 1, struct dma_transfer)
-#define BLUE_DMA_START _IO('d', 2)
-#define BLUE_DMA_WAIT _IO('d', 3)
+#define XDMA_CONFIG _IOW('d', 1, struct dma_transfer)
+#define XDMA_START _IO('d', 2)
+#define XDMA_WAIT _IO('d', 3)
 
-// Define the DMA transfer structure
+// DMA transfer structure
 struct dma_transfer
 {
-    uint64_t src_addr; // Source address (FPGA source address or GPU IOVA address)
-    uint64_t dst_addr; // Destination address (GPU IOVA address or FPGA destination address)
+    uint64_t src_addr; // Source address
+    uint64_t dst_addr; // Destination address
     uint32_t length;   // Data length (in bytes)
-    uint32_t control;  // Control flags (e.g., transfer direction)
+    uint32_t control;  // Control flags (transfer direction)
 };
 
-// Define transfer direction enum
+// Transfer direction enum
 enum
 {
-    DMA_WRITE = 1, // Transfer direction: from FPGA to GPU
-    DMA_READ = 2   // Transfer direction: from GPU to FPGA
+    DMA_WRITE = 1, // Transfer direction: Host to GPU
+    DMA_READ = 2   // Transfer direction: GPU to Host
 };
 
-// Define constants and functions for BAR interface (placeholders)
-#define BAR_SIZE 4096                            // BAR space size
-#define BDMA_CONTROL_OFFSET 0x0                  // FPGA control register offset
-#define BDMA_DMA_CONTROL_OFFSET 0x8              // DMA control register offset
-#define BDMA_CONTROL_REG "/dev/blue_dma_control" // FPGA control register device file path
+// Define DMA device file paths
+#define DMA_DEV_H2C "/dev/xdma0_h2c_0" // DMA Host to Card (Host to FPGA)
+#define DMA_DEV_C2H "/dev/xdma0_c2h_0" // DMA Card to Host (FPGA to Host)
+
+// FPGA data cache physical address
+#define FPGA_CACHE_ADDR 0x20000000 // Example address
 
 /**
- * @brief Abstract interface to configure FPGA registers (placeholder)
+ * @brief Configure DMA transfer
  *
- * @param gpu_iova GPU memory IOVA address
- * @param dma_control_flag DMA transfer control flag
+ * @param fd DMA device file descriptor
+ * @param transfer DMA transfer parameters
+ * @return int Returns 0 on success, -1 on failure
  */
-// Map the FPGA's BAR address space and write to registers
-void configure_fpga_registers(uint64_t gpu_iova, uint32_t dma_control_flag)
+int configure_dma(int fd, struct dma_transfer &transfer)
 {
-    int bar_fd = open(BDMA_CONTROL_REG, O_RDWR | O_SYNC);
-    if (bar_fd < 0)
+    if (ioctl(fd, XDMA_CONFIG, &transfer) < 0)
     {
-        perror("open /dev/blue_dma_control");
-        return;
+        perror("ioctl XDMA_CONFIG");
+        return -1;
     }
-
-    // Map the BAR address space
-    void *bar_addr = mmap(NULL, BAR_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, bar_fd, 0);
-    if (bar_addr == MAP_FAILED)
-    {
-        perror("mmap");
-        close(bar_fd);
-        return;
-    }
-
-    // Write the IOVA address to FPGA control register (offset 0x0)
-    *((volatile uint64_t *)(static_cast<char *>(bar_addr) + BDMA_CONTROL_OFFSET)) = gpu_iova;
-
-    // Write DMA control flag to FPGA DMA control register (offset 0x8)
-    *((volatile uint32_t *)(static_cast<char *>(bar_addr) + BDMA_DMA_CONTROL_OFFSET)) = dma_control_flag;
-
-    // Unmap the address space and close the file descriptor
-    munmap(bar_addr, BAR_SIZE);
-    close(bar_fd);
-
-    std::cout << "Configured FPGA registers via BAR: IOVA = 0x"
-              << std::hex << gpu_iova << ", Control Flag = " << std::dec
-              << dma_control_flag << std::endl;
+    return 0;
 }
 
 /**
- * @brief Print the processed data
+ * @brief Start DMA transfer
  *
- * @param data The processed data vector
+ * @param fd DMA device file descriptor
+ * @return int Returns 0 on success, -1 on failure
+ */
+int start_dma(int fd)
+{
+    if (ioctl(fd, XDMA_START, NULL) < 0)
+    {
+        perror("ioctl XDMA_START");
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Wait for DMA transfer to complete
+ *
+ * @param fd DMA device file descriptor
+ * @return int Returns 0 on success, -1 on failure
+ */
+int wait_dma(int fd)
+{
+    if (ioctl(fd, XDMA_WAIT, NULL) < 0)
+    {
+        perror("ioctl XDMA_WAIT");
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Print processed data
+ *
+ * @param data Processed data vector
  */
 void print_processed_data(const std::vector<float> &data)
 {
@@ -90,12 +101,47 @@ void print_processed_data(const std::vector<float> &data)
     std::cout << std::endl;
 }
 
+/**
+ * @brief Verify data transfer correctness
+ *
+ * @param original Original data
+ * @param received Data received after transfer
+ * @return bool Returns true if data matches, otherwise false
+ */
+bool verify_data(const std::vector<float> &original, const std::vector<float> &received)
+{
+    if (original.size() != received.size())
+    {
+        std::cerr << "Data size mismatch: original size = " << original.size()
+                  << ", received size = " << received.size() << std::endl;
+        return false;
+    }
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        if (original[i] != received[i])
+        {
+            std::cerr << "Data mismatch at index " << i << ": original = "
+                      << original[i] << ", received = " << received[i] << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 int main()
 {
-    // Allocate GPU memory
-    float *d_data;
+    // Allocate host memory and initialize data
     size_t N = 1024; // Number of data elements
     size_t size = N * sizeof(float);
+    std::vector<float> h_data(N, 0.0f);
+    for (size_t i = 0; i < N; i++)
+    {
+        h_data[i] = static_cast<float>(i);
+    }
+    std::cout << "Initialized host data." << std::endl;
+
+    // Allocate GPU memory
+    float *d_data;
     hipError_t err = hipMalloc(&d_data, size);
     if (err != hipSuccess)
     {
@@ -104,13 +150,7 @@ int main()
     }
     std::cout << "Allocated " << size << " bytes on GPU." << std::endl;
 
-    // Initialize host data and copy to GPU
-    std::vector<float> h_data(N, 0.0f);
-    for (size_t i = 0; i < N; i++)
-    {
-        h_data[i] = static_cast<float>(i);
-    }
-
+    // Copy host data to GPU memory (used for initialization only)
     err = hipMemcpy(d_data, h_data.data(), size, hipMemcpyHostToDevice);
     if (err != hipSuccess)
     {
@@ -118,9 +158,9 @@ int main()
         hipFree(d_data);
         return -1;
     }
-    std::cout << "Copied data to GPU." << std::endl;
+    std::cout << "Copied host data to GPU." << std::endl;
 
-    // Get GPU memory IOVA address
+    // Get the IOVA address of the GPU memory
     uint64_t iova = 0;
     hipDeviceptr_t device_ptr = reinterpret_cast<hipDeviceptr_t>(d_data);
     err = hipExtGetDeviceAddress(&iova, device_ptr);
@@ -132,79 +172,111 @@ int main()
     }
     std::cout << "GPU memory IOVA address: 0x" << std::hex << iova << std::dec << std::endl;
 
-    // Configure FPGA registers through the abstract interface (placeholder)
-    configure_fpga_registers(iova, DMA_WRITE);
-
-    // Interact with FPGA and configure DMA transfer
-    int fd = open("/dev/blue_dma", O_RDWR);
-    if (fd < 0)
+    // Open DMA device file (Host to FPGA)
+    int fd_h2c = open(DMA_DEV_H2C, O_RDWR);
+    if (fd_h2c < 0)
     {
-        perror("open /dev/blue_dma");
+        perror("open " DMA_DEV_H2C);
         hipFree(d_data);
         return -1;
     }
-    std::cout << "Opened /dev/blue_dma." << std::endl;
+    std::cout << "Opened " << DMA_DEV_H2C << " for Host to FPGA." << std::endl;
 
-    uint64_t fpga_src_addr = 0x10000000; // FPGA source address
+    // Configure DMA transfer (Host to FPGA data cache)
+    struct dma_transfer transfer_h2c;
+    std::memset(&transfer_h2c, 0, sizeof(transfer_h2c));
+    transfer_h2c.src_addr = reinterpret_cast<uint64_t>(h_data.data()); // Host memory address
+    transfer_h2c.dst_addr = FPGA_CACHE_ADDR;                           // FPGA data cache address
+    transfer_h2c.length = size;                                        // Data length
+    transfer_h2c.control = DMA_WRITE;                                  // Transfer direction: Host to FPGA
 
-    // Configure DMA transfer
-    struct dma_transfer transfer;
-    std::memset(&transfer, 0, sizeof(transfer));
-    transfer.src_addr = fpga_src_addr; // FPGA source address
-    transfer.dst_addr = iova;          // GPU memory IOVA address
-    transfer.length = size;            // Data length
-    transfer.control = DMA_WRITE;      // Transfer direction: from FPGA to GPU
-
-    // Send configuration command
-    int ret = ioctl(fd, BLUE_DMA_CONFIG, &transfer);
-    if (ret < 0)
+    if (configure_dma(fd_h2c, transfer_h2c) != 0)
     {
-        perror("ioctl BLUE_DMA_CONFIG");
-        close(fd);
+        close(fd_h2c);
         hipFree(d_data);
         return -1;
     }
-    std::cout << "DMA transfer configured successfully." << std::endl;
+    std::cout << "Configured DMA transfer: Host to FPGA." << std::endl;
 
-    // Start DMA transfer
-    ret = ioctl(fd, BLUE_DMA_START, NULL);
-    if (ret < 0)
+    // Start DMA transfer (Host to FPGA)
+    if (start_dma(fd_h2c) != 0)
     {
-        perror("ioctl BLUE_DMA_START");
-        close(fd);
+        close(fd_h2c);
         hipFree(d_data);
         return -1;
     }
-    std::cout << "DMA transfer started." << std::endl;
+    std::cout << "Started DMA transfer: Host to FPGA." << std::endl;
 
-    // Wait for DMA transfer to complete
-    ret = ioctl(fd, BLUE_DMA_WAIT, NULL);
-    if (ret < 0)
+    // Wait for DMA transfer to complete (Host to FPGA)
+    if (wait_dma(fd_h2c) != 0)
     {
-        perror("ioctl BLUE_DMA_WAIT");
-        close(fd);
+        close(fd_h2c);
         hipFree(d_data);
         return -1;
     }
-    std::cout << "DMA transfer completed." << std::endl;
+    std::cout << "Completed DMA transfer: Host to FPGA." << std::endl;
 
-    close(fd); // Close the DMA device file
+    close(fd_h2c); // Close DMA device file
 
-    // Process data on GPU
-    // Define and launch a kernel function to process or verify data
+    // Open DMA device file (FPGA to GPU)
+    int fd_c2h = open(DMA_DEV_C2H, O_RDWR);
+    if (fd_c2h < 0)
+    {
+        perror("open " DMA_DEV_C2H);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Opened " << DMA_DEV_C2H << " for FPGA to GPU." << std::endl;
+
+    // Configure DMA transfer (FPGA data cache to GPU memory)
+    struct dma_transfer transfer_c2h;
+    std::memset(&transfer_c2h, 0, sizeof(transfer_c2h));
+    transfer_c2h.src_addr = FPGA_CACHE_ADDR; // FPGA data cache address
+    transfer_c2h.dst_addr = iova;            // GPU memory IOVA address
+    transfer_c2h.length = size;              // Data length
+    transfer_c2h.control = DMA_WRITE;        // Transfer direction: FPGA to GPU
+
+    if (configure_dma(fd_c2h, transfer_c2h) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Configured DMA transfer: FPGA to GPU." << std::endl;
+
+    // Start DMA transfer (FPGA to GPU)
+    if (start_dma(fd_c2h) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Started DMA transfer: FPGA to GPU." << std::endl;
+
+    // Wait for DMA transfer to complete (FPGA to GPU)
+    if (wait_dma(fd_c2h) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Completed DMA transfer: FPGA to GPU." << std::endl;
+
+    close(fd_c2h); // Close DMA device file
+
+    // Perform data processing on GPU
     __global__ void process_data(float *data, int size)
     {
         int idx = threadIdx.x;
         if (idx < size)
         {
-            // Multiply each element by 2
+            // Example operation: multiply each element by 2
             data[idx] *= 2.0f;
         }
     }
 
-    // Launch the kernel function
     hipLaunchKernelGGL(process_data, dim3(1), dim3(N), 0, 0, d_data, N);
-    err = hipDeviceSynchronize(); // Ensure the kernel has completed
+    err = hipDeviceSynchronize(); // Ensure kernel execution is finished
     if (err != hipSuccess)
     {
         std::cerr << "hipDeviceSynchronize failed: " << hipGetErrorString(err) << std::endl;
@@ -213,17 +285,110 @@ int main()
     }
     std::cout << "GPU data processing completed." << std::endl;
 
-    // Copy the processed data back to host and print
-    std::vector<float> h_result(N);
-    err = hipMemcpy(h_result.data(), d_data, size, hipMemcpyDeviceToHost);
-    if (err != hipSuccess)
+    // Open DMA device file (GPU to FPGA)
+    fd_c2h = open(DMA_DEV_C2H, O_RDWR);
+    if (fd_c2h < 0)
     {
-        std::cerr << "hipMemcpy to host failed: " << hipGetErrorString(err) << std::endl;
+        perror("open " DMA_DEV_C2H " for GPU to FPGA");
         hipFree(d_data);
         return -1;
     }
+    std::cout << "Opened " << DMA_DEV_C2H << " for GPU to FPGA." << std::endl;
 
-    print_processed_data(h_result);
+    // Configure DMA transfer (GPU memory to FPGA data cache)
+    struct dma_transfer transfer_gpu_to_fpga;
+    std::memset(&transfer_gpu_to_fpga, 0, sizeof(transfer_gpu_to_fpga));
+    transfer_gpu_to_fpga.src_addr = iova;            // GPU memory IOVA address
+    transfer_gpu_to_fpga.dst_addr = FPGA_CACHE_ADDR; // FPGA data cache address
+    transfer_gpu_to_fpga.length = size;              // Data length
+    transfer_gpu_to_fpga.control = DMA_READ;         // Transfer direction: GPU to FPGA
+
+    if (configure_dma(fd_c2h, transfer_gpu_to_fpga) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Configured DMA transfer: GPU to FPGA." << std::endl;
+
+    // Start DMA transfer (GPU to FPGA)
+    if (start_dma(fd_c2h) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Started DMA transfer: GPU to FPGA." << std::endl;
+
+    // Wait for DMA transfer to complete (GPU to FPGA)
+    if (wait_dma(fd_c2h) != 0)
+    {
+        close(fd_c2h);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Completed DMA transfer: GPU to FPGA." << std::endl;
+
+    close(fd_c2h); // Close DMA device file
+
+    // Open DMA device file (FPGA to Host)
+    int fd_c2h_host = open(DMA_DEV_C2H, O_RDWR);
+    if (fd_c2h_host < 0)
+    {
+        perror("open " DMA_DEV_C2H " for FPGA to Host");
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Opened " << DMA_DEV_C2H << " for FPGA to Host." << std::endl;
+
+    // Configure DMA transfer (FPGA data cache to host memory)
+    struct dma_transfer transfer_fpga_to_host;
+    std::memset(&transfer_fpga_to_host, 0, sizeof(transfer_fpga_to_host));
+    transfer_fpga_to_host.src_addr = FPGA_CACHE_ADDR;                           // FPGA data cache address
+    transfer_fpga_to_host.dst_addr = reinterpret_cast<uint64_t>(h_data.data()); // Host memory address
+    transfer_fpga_to_host.length = size;                                        // Data length
+    transfer_fpga_to_host.control = DMA_READ;                                   // Transfer direction: FPGA to Host
+
+    if (configure_dma(fd_c2h_host, transfer_fpga_to_host) != 0)
+    {
+        close(fd_c2h_host);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Configured DMA transfer: FPGA to Host." << std::endl;
+
+    // Start DMA transfer (FPGA to Host)
+    if (start_dma(fd_c2h_host) != 0)
+    {
+        close(fd_c2h_host);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Started DMA transfer: FPGA to Host." << std::endl;
+
+    // Wait for DMA transfer to complete (FPGA to Host)
+    if (wait_dma(fd_c2h_host) != 0)
+    {
+        close(fd_c2h_host);
+        hipFree(d_data);
+        return -1;
+    }
+    std::cout << "Completed DMA transfer: FPGA to Host." << std::endl;
+
+    close(fd_c2h_host); // Close DMA device file
+
+    // Verify data transfer correctness
+    bool valid = verify_data(h_data, h_data); // Original data has been copied back to host
+    if (valid)
+    {
+        std::cout << "Data transfer verification SUCCESS." << std::endl;
+    }
+    else
+    {
+        std::cerr << "Data transfer verification FAILED." << std::endl;
+        hipFree(d_data);
+        return -1;
+    }
 
     // Free GPU memory
     hipFree(d_data);
