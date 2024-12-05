@@ -3,14 +3,14 @@ name: CI - ROCm and Xilinx DMA RDMA Test
 on:
   push:
     branches:
-      - main  
+      - main
   pull_request:
     branches:
-      - main  
+      - main
 
 jobs:
   setup:
-    runs-on: ubuntu-latest  
+    runs-on: ubuntu-latest
 
     steps:
     # Checkout code from the repository
@@ -22,8 +22,9 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y wget gnupg
-        wget -qO - http://repo.radeon.com/rocm/rocm-keys.asc | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://repo.radeon.com/rocm/apt/debian/ rocm main" > /etc/apt/sources.list.d/rocm.list'
+        # Add ROCm repository
+        wget -qO - http://repo.radeon.com/rocm/rocm-keys.asc | gpg --dearmor -o /usr/share/keyrings/rocm-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/rocm-archive-keyring.gpg] http://repo.radeon.com/rocm/apt/debian/ rocm main" | sudo tee /etc/apt/sources.list.d/rocm.list
         sudo apt update
         sudo apt install -y rocm-dkms rocm-dev rocm-utils
         echo 'export PATH=/opt/rocm/bin:$PATH' >> ~/.bashrc
@@ -35,7 +36,7 @@ jobs:
       run: |
         sudo apt install -y xilinx-dma-driver
 
-    # Set up GPU and FPGA environment
+    # Set up GPU and FPGA environment (simulation)
     - name: Set up hardware (simulation)
       run: |
         # Assuming hardware is already set up (e.g., FPGA and GPU are correctly connected)
@@ -47,17 +48,14 @@ jobs:
     # Build the ROCm program
     - name: Build ROCm Program
       run: |
-        # Make sure HIPCC is available and use it to compile the code
         hipcc -o server server.cpp
 
     # Run the ROCm program
     - name: Run the ROCm Program
       run: |
-        # Run the compiled program with root privileges (needed for DMA access)
         sudo ./server
       
     # Clean up (optional)
     - name: Clean up
       run: |
-        # Clean up build artifacts if necessary
         rm -f server
